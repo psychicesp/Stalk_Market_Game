@@ -1,6 +1,7 @@
 #include <WiFi.h>
 #include <PubSubClient.h> // For MQTT client functionality
 #include <ArduinoJson.h>
+#include <UUID.h>
 
 // --- Wi-Fi Configuration ---
 // Replace with your actual Wi-Fi network SSID and password
@@ -20,15 +21,15 @@ const int NUM_BUTTONS = 2;                   // Configure for more buttons
 const int BUTTON_PINS[NUM_BUTTONS] = {2, 4}; // Example GPIOs for ESP32 DevKitC (Button 1, Button 2)
 
 // --- Button State Variables for Debouncing ---
-int lastButtonState[NUM_BUTTONS];                  // Stores the previous state of each button
-unsigned long lastDebounceTime[NUM_BUTTONS] = {0}; // Timestamp of the last button state change
-const unsigned long DEBOUNCE_DELAY_MS = 50;        // Debounce time in milliseconds to prevent false triggers
+// Some switches have internal parts which can "rattle";  Introducing a "debounce" threshhold prevents registering these as separate clicks
+int lastButtonState[NUM_BUTTONS];
+unsigned long lastDebounceTime[NUM_BUTTONS] = {0};
+const unsigned long DEBOUNCE_DELAY_MS = 25;// This is in miliseconds. If a button is held down for a lower duration the click will not register.
 
-
-String deviceMAC;
+String deviceMAC; // Adding MAC address allows central systems to indentify which remote pressed a button
+UUID uuidGenerator;
 
 WiFiClient espClient;
-
 PubSubClient mqttClient(espClient);
 
 // --- Function to Connect to Wi-Fi ---
@@ -71,7 +72,6 @@ void reconnectMQTT()
         if (mqttClient.connect(clientId.c_str()))
         {
             Serial.println("connected");
-
         }
         else
         {
@@ -88,26 +88,22 @@ void publishButtonPress(int buttonId)
 {
     if (WiFi.status() != WL_CONNECTED)
     {
-        connectToWiFi()
-        Serial.println("WiFi not connected. Attempting to reconnect.  Message may not have been sent");
+        connectToWiFi();
+        Serial.println("WiFi not connected. Attempting to reconnect. Message may not have been sent");
         return;
     }
 
-    // Check MQTT connection status BEFORE attempting to publish.
     if (!mqttClient.connected())
     {
-        Serial.println("MQTT client not connected. Attempting to reconnect.  Message may not have been sent");
+        Serial.println("MQTT client not connected. Attempting to reconnect. Message may not have been sent");
         reconnectMQTT();
     }
 
-    // Create a mutable JSON document.
-    // 96 bytes should be enough for a payload like {"mac": "XX:XX:XX:XX:XX:XX", "buttonId": N}
-    // Rounding up to the next base 2 number because why not
-    StaticJsonDocument<128> doc;
-
-    // Add the unique device ID (MAC address) to the JSON payload
+    StaticJsonDocument<256> doc; // 38 bytes for UUID string, 18 bytes for MAC string, 4 bytes for buttonId, 24 bytes for keys, and 72 bytes for object overhead/cushion.
     doc["mac"] = deviceMAC;
     doc["buttonId"] = buttonId;
+    uuidGenerator.generate();
+    doc["messageId"] = uuidGenerator.toCharArray();
 
     String payloadString;
     serializeJson(doc, payloadString);
@@ -116,7 +112,6 @@ void publishButtonPress(int buttonId)
     Serial.print(MQTT_TOPIC);
     Serial.print("': ");
     Serial.println(payloadString);
-
 
     if (mqttClient.publish(MQTT_TOPIC, payloadString.c_str()))
     {
@@ -132,16 +127,14 @@ void publishButtonPress(int buttonId)
 // --- Setup Function (runs once at startup) ---
 void setup()
 {
-    Serial.begin(115200); // Initialize serial communication at 115200 baud rate for debugging output
+    Serial.begin(115200); // This number is the BAUD rate. 115200 is pretty standard
 
-    // Configure button pins and read their initial states
     for (int i = 0; i < NUM_BUTTONS; i++)
     {
-        pinMode(BUTTON_PINS[i], INPUT_PULLUP);            // Enable internal pull-up resistor
-        lastButtonState[i] = digitalRead(BUTTON_PINS[i]); // Record current button state
+        pinMode(BUTTON_PINS[i], INPUT_PULLUP);
+        lastButtonState[i] = digitalRead(BUTTON_PINS[i]);
     }
 
-    // Get and store the unique MAC address of the Wi-Fi station interface.
     WiFi.mode(WIFI_STA);
     deviceMAC = WiFi.macAddress();
     Serial.print("This ESP32's MAC Address (Unique ID): ");
@@ -149,9 +142,7 @@ void setup()
 
     connectToWiFi();
 
-    // Set MQTT server and port
     mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
-
     reconnectMQTT();
 }
 
@@ -205,5 +196,5 @@ void loop()
         }
     }
 
-    delay(10); // Short delay to yield CPU time and prevent a tight loop
+    delay(20); // Short delay to yield CPU time and prevent a tight loop.  Lower number increases polling rate and higher number saves battery. It should be less than the DEBOUNCE rate
 }
